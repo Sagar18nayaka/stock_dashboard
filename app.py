@@ -1,80 +1,144 @@
 import streamlit as st
-import yfinance as yf
-import plotly.express as px
 import pandas as pd
-import time
+import yfinance as yf
+from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
-st.title("📊 Real-Time Stock Market Dashboard")
+#  Page Config & Dark Mode Theme
+st.set_page_config(
+    page_title="Real-Time Stock Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-ticker = st.text_input("Enter Stock Symbol", "AAPL")
-
-if ticker:
-    stock = yf.Ticker(ticker)
-    data = yf.download(ticker, period="5d", interval="1h")
-
-    if not data.empty:
-        # Check if columns are multi-indexed, flatten if yes
-        if isinstance(data.columns, pd.MultiIndex):
-            data.columns = data.columns.get_level_values(0)
-
-        st.write("### Latest Stock Data")
-        st.write(f"**Open:** {data['Open'].iloc[0]:.2f}")
-        st.write(f"**High:** {data['High'].iloc[0]:.2f}")
-        st.write(f"**Low:** {data['Low'].iloc[0]:.2f}")
-        st.write(f"**Close:** {data['Close'].iloc[0]:.2f}")
-        st.write(f"**Volume:** {int(data['Volume'].iloc[0])}")
-
-        percent_change = ((data['Close'].iloc[0] - data['Open'].iloc[0]) / data['Open'].iloc[0]) * 100
-        st.write(f"**Percent Change:** {percent_change:.2f}%")
-
-        st.write("---")
-
-        st.write("### Recent Stock Price (5 days, 1h interval)")
-        fig = px.line(data, x=data.index, y="Close", title=f"{ticker} Stock Price")
-        st.plotly_chart(fig)
-    else:
-        st.error("No recent data found. Please enter a valid stock symbol.")
-
-    st.write("---")
-
-    st.write("### Historical Data")
-    period = st.selectbox("Select Time Range", ["1 Month", "3 Months", "6 Months", "1 Year"])
-
-    period_dict = {
-        "1 Month": "1mo",
-        "3 Months": "3mo",
-        "6 Months": "6mo",
-        "1 Year": "1y"
+st.markdown(
+    """
+    <style>
+    .reportview-container {
+        background-color: #0E1117;
+        color: white;
     }
+    .sidebar .sidebar-content {
+        background-color: #1A1C23;
+        color: white;
+    }
+    .stDataFrame tbody th, .stDataFrame tbody td {
+        color: white;
+    }
+    .stDownloadButton button {
+        background-color: #2E8B57;
+        color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
 
-    hist_data = stock.history(period=period_dict[period])
+st.title("📈 Real-Time Stock Market Dashboard")
+st.markdown("Track stock prices in real-time, download data, and view historical trends with charts.")
 
-    if not hist_data.empty:
-        st.line_chart(hist_data['Close'])
+#  Sidebar: Stock Selection
+st.sidebar.header("Select Stocks")
+stocks_input = st.sidebar.text_input("Enter stock symbols (comma separated)", "AAPL,GOOGL,MSFT,AMZN,TSLA,NVDA")
+stock_symbols = [s.strip().upper() for s in stocks_input.split(",")]
 
-        hist_data['SMA_20'] = hist_data['Close'].rolling(window=20).mean()
-        hist_data['EMA_20'] = hist_data['Close'].ewm(span=20, adjust=False).mean()
+#  Sidebar: Refresh Interval
+st.sidebar.header("Refresh Settings")
+refresh_time = st.sidebar.number_input(
+    "Auto-refresh interval (seconds)",
+    min_value=10,
+    max_value=3600,
+    value=60,
+    step=10
+)
 
-        st.write("### Historical Data with Moving Averages (20 days)")
-        st.line_chart(hist_data[['Close', 'SMA_20', 'EMA_20']])
-    else:
-        st.error("No historical data available for this period.")
+#  Auto-refresh
+st_autorefresh(interval=refresh_time * 1000, key="stock_refresh")
 
-    st.write("---")
+#  Fetch & Prepare Stock Data
+data_list = []
+historical_data = {}
+invalid_symbols = []
 
-    st.write("### Auto-Refresh")
-    refresh_interval = st.slider("Refresh every (seconds)", min_value=10, max_value=300, value=60, step=10)
+for symbol in stock_symbols:
+    try:
+        stock = yf.Ticker(symbol)
+        df_stock = stock.history(period="2d")
+        df_hist = stock.history(period="30d")
+        if df_stock.empty:
+            invalid_symbols.append(symbol)
+            continue
+        last_price = df_stock['Close'].iloc[-1]
+        prev_price = df_stock['Close'].iloc[-2] if len(df_stock) > 1 else last_price
+        change = last_price - prev_price
+        pct_change = (change / prev_price) * 100 if prev_price != 0 else 0
+        arrow = "🔺" if change > 0 else ("🔻" if change < 0 else "")
+        data_list.append({
+            "Stock": symbol,
+            "Price": last_price,
+            "Change": f"{arrow} {change:.2f}",
+            "Percent Change": pct_change
+        })
+        historical_data[symbol] = df_hist['Close']
+    except Exception as e:
+        invalid_symbols.append(symbol)
 
-    time.sleep(refresh_interval)
-    st.experimental_rerun()
+if invalid_symbols:
+    st.warning(f"The following symbols are invalid or data unavailable: {', '.join(invalid_symbols)}")
 
-    st.write("---")
-    st.write("### Export Historical Data")
-    csv = hist_data.to_csv().encode('utf-8')
+df = pd.DataFrame(data_list)
 
+if not df.empty:
+    #  Styled DataFrame
+    def color_change(val):
+        if "🔺" in str(val):
+            color = 'green'
+        elif "🔻" in str(val):
+            color = 'red'
+        else:
+            color = 'white'
+        return f'color: {color}'
+
+    st.subheader("📊 Stock Prices")
+
+    styled_df = df.style.map(color_change, subset=['Change'])\
+                        .background_gradient(subset=['Percent Change'], cmap='RdYlGn', axis=None)\
+                        .format({"Percent Change": "{:.2f}%"})
+
+    st.dataframe(styled_df, width='stretch')
+
+    #  Export to CSV
+    csv = df.copy()
+    csv['Percent Change'] = csv['Percent Change'].apply(lambda x: f"{x:.2f}%")
+    csv_file = csv.to_csv(index=False).encode('utf-8')
     st.download_button(
-        label="Download Historical Data as CSV",
-        data=csv,
-        file_name=f"{ticker}_historical_data.csv",
-        mime='text/csv'
+        label="Download CSV",
+        data=csv_file,
+        file_name='stock_data.csv',
+        mime='text/csv',
     )
+
+    #  Current Prices Line Chart
+    st.subheader("📈 Current Prices")
+    st.line_chart(df.set_index("Stock")["Price"])
+
+    #  Percent Change Bar Chart
+    st.subheader("📊 Percent Change")
+    st.bar_chart(df.set_index("Stock")["Percent Change"])
+
+    #  Historical Charts Per Stock
+    st.subheader("📈 Historical Price Charts (Last 30 Days)")
+    for symbol, series in historical_data.items():
+        st.markdown(f"*{symbol}*")
+        st.line_chart(series)
+
+    #  Comparison Chart of All Stocks
+    st.subheader("📊 Comparison Chart of All Stocks (Last 30 Days)")
+    hist_df = pd.DataFrame(historical_data)
+    st.line_chart(hist_df)
+
+    #  Last Updated Timestamp
+    st.markdown(f"*Last updated:* {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+else:
+    st.warning("No valid stock data available. Check stock symbols.")
